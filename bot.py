@@ -7,6 +7,7 @@ and long polling to avoid external dependencies.
 
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -16,10 +17,8 @@ import urllib.request
 
 
 WELCOME_TEXT = (
-    "Вітаємо!" 
-    "Для Вашої ідентифікації натиснить кнопку 'Поділитися телефоном'.\n"
-    "Менеджер відповість Вам у найближчий час. \n"
-    "Звертаємо увагу, що ми працюємо у будні дні з 09 по 18. " 
+    "Надішліть номер телефона для ідентифікації клієнта. "
+    "Звертаємо увагу, що ми працюємо у будні дні з 09 по 18."
 )
 
 REQUEST_CONTACT_BUTTON = {
@@ -113,13 +112,18 @@ def clear_webhook(token: str) -> None:
         print(f"Unable to delete webhook automatically: {exc}")
 
 
-def _fetch_keycrm(phone: str) -> dict | None:
+def _fetch_keycrm(filter_field: str, value: str) -> dict | None:
     keycrm_token = _get_keycrm_token()
     if not keycrm_token:
         return None
 
     params = urllib.parse.urlencode(
-        {"limit": 15, "page": 1, "filter[buyer_phone]": phone}
+        {
+            "limit": 15,
+            "page": 1,
+            "include": "manager,company,shipping,custom_fields",
+            f"filter[{filter_field}]": value,
+        }
     )
     url = f"{KEYCRM_API_URL}?{params}"
     request = urllib.request.Request(url, method="GET")
@@ -135,32 +139,105 @@ def _fetch_keycrm(phone: str) -> dict | None:
         return None
 
 
-def _lookup_buyer_by_phone(phone: str) -> tuple[dict | None, int]:
-    result = _fetch_keycrm(phone)
+def _lookup_buyers(filter_field: str, value: str) -> tuple[list[dict], int]:
+    result = _fetch_keycrm(filter_field, value)
     if result is None:
-        return None, 0
-    data = result.get("data") or []
+        return [], 0
+    buyers = result.get("data") or []
     total = result.get("total", 0)
-    buyer = data[0] if data else None
-    return buyer, total
+    return buyers, total
 
 
-def _format_crm_message(buyer: dict | None, total: int) -> str:
-    if buyer is None:
+def _format_crm_message(buyers: list[dict], total: int) -> str:
+    if not buyers:
         if _get_keycrm_token():
-            return "Цей номер у CRM не знайдено."
+            return "Номер не знайдено в системі."
         return "Перевірка номера в CRM недоступна зараз."
 
-    name = buyer.get("full_name") or buyer.get("name") or "Без імені"
-    suffix = f" Всього збігів: {total}." if total else ""
-    return f"Номер вже є в CRM як: {name}.{suffix}"
+    def _join(values: list[str] | None) -> str:
+        return ", ".join([v for v in values or [] if v])
+
+    def _format_shipping(shipping: list[dict] | None) -> list[str]:
+        lines: list[str] = []
+        for item in (shipping or [])[:3]:
+            parts = [
+                item.get("address"),
+                item.get("additional_address"),
+                item.get("city"),
+                item.get("region"),
+                item.get("zip_code"),
+                item.get("country"),
+            ]
+            packed = ", ".join([p for p in parts if p])
+            if packed:
+                lines.append(f"Адреса: {packed}")
+        return lines
+
+    def _format_custom_fields(custom_fields: list[dict] | None) -> list[str]:
+        lines: list[str] = []
+        for cf in custom_fields or []:
+            uuid = cf.get("uuid") or "поле"
+            value = cf.get("value")
+            if value:
+                if isinstance(value, list):
+                    value = ", ".join(map(str, value))
+                lines.append(f"{uuid}: {value}")
+        return lines[:5]
+
+    matches = f"{total} збіг" if total == 1 else f"{total} збігів"
+    lines = [f"Знайдено {matches}:"]
+
+    for idx, buyer in enumerate(buyers[:5], start=1):  # обмежуємо перші 5
+        name = buyer.get("full_name") or buyer.get("name") or "Без імені"
+        manager = buyer.get("manager") or {}
+        manager_name = (
+            manager.get("name") or manager.get("full_name") or "не призначений"
+        )
+
+        block: list[str] = [
+            f"{idx}. Клієнт: {name}",
+            f"   Менеджер: {manager_name}",
+        ]
+
+        emails = _join(buyer.get("email"))
+        if emails:
+            block.append(f"   E-mail: {emails}")
+
+        phones = _join(buyer.get("phone"))
+        if phones:
+            block.append(f"   Телефон(и): {phones}")
+
+        birthday = buyer.get("birthday")
+        if birthday:
+            block.append(f"   Дата народження: {birthday}")
+
+        company = buyer.get("company") or {}
+        company_name = company.get("name")
+        if company_name:
+            block.append(f"   Компанія: {company_name}")
+
+        for addr in _format_shipping(buyer.get("shipping")):
+            block.append(f"   {addr}")
+
+        cf_lines = _format_custom_fields(buyer.get("custom_fields"))
+        if cf_lines:
+            block.append("   Кастомні поля:")
+            block.extend([f"   - {line}" for line in cf_lines])
+
+        lines.extend(block)
+
+    if total > len(buyers):
+        lines.append("Показані перші записи.")
+
+    return "\n".join(lines)
 
 
-def _update_buyer_note(buyer: dict, message: str) -> None:
+def _update_buyer_note_for_first(buyers: list[dict], message: str) -> None:
     keycrm_token = _get_keycrm_token()
-    if not keycrm_token:
+    if not keycrm_token or not buyers:
         return
 
+    buyer = buyers[0]
     buyer_id = buyer.get("id")
     if not buyer_id:
         return
@@ -182,6 +259,27 @@ def _update_buyer_note(buyer: dict, message: str) -> None:
             json.load(resp)
     except Exception as exc:  # pragma: no cover - логування у CRM не критичне
         print(f"Не вдалося оновити примітку в CRM для buyer_id={buyer_id}: {exc}")
+
+
+def _normalize_phone(raw: str) -> str | None:
+    """Return phone in format +380XXXXXXXXX or None if cannot normalize."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 12 and digits.startswith("380"):
+        return f"+{digits}"
+    if len(digits) == 10 and digits.startswith("0"):
+        return f"+380{digits[1:]}"
+    if len(digits) == 9:  # e.g., 991234567
+        return f"+380{digits}"
+    if len(digits) == 11 and digits.startswith("80"):
+        return f"+3{digits}"
+    return None
+
+
+def _normalize_email(raw: str) -> str | None:
+    candidate = (raw or "").strip()
+    if re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", candidate):
+        return candidate.lower()
+    return None
 
 
 def main() -> None:
@@ -206,15 +304,50 @@ def main() -> None:
                     send_welcome(token, chat_id)
                 elif message.get("contact") and chat_id:
                     contact = message["contact"]
-                    phone = contact.get("phone_number", "невідомий номер")
-                    buyer, total = _lookup_buyer_by_phone(phone)
+                    phone_raw = contact.get("phone_number", "невідомий номер")
+                    phone = _normalize_phone(phone_raw) or phone_raw
+                    buyers, total = _lookup_buyers("buyer_phone", phone)
                     response_text = (
                         f"Дякуємо! Ми отримали ваш номер: {phone}.\n"
-                        f"{_format_crm_message(buyer, total)}"
+                        f"{_format_crm_message(buyers, total)}"
                     )
                     _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
-                    if buyer:
-                        _update_buyer_note(buyer, response_text)
+                    if buyers:
+                        _update_buyer_note_for_first(buyers, response_text)
+                elif chat_id and text:
+                    normalized = _normalize_phone(text)
+                    if normalized:
+                        buyers, total = _lookup_buyers("buyer_phone", normalized)
+                        response_text = (
+                            f"Дякуємо! Ми отримали ваш номер: {normalized}.\n"
+                            f"{_format_crm_message(buyers, total)}"
+                        )
+                        _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
+                        if buyers:
+                            _update_buyer_note_for_first(buyers, response_text)
+                        continue
+
+                    email = _normalize_email(text)
+                    if email:
+                        buyers, total = _lookup_buyers("buyer_email", email)
+                        response_text = (
+                            f"Дякуємо! Ми отримали ваш e-mail: {email}.\n"
+                            f"{_format_crm_message(buyers, total)}"
+                        )
+                        _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
+                        if buyers:
+                            _update_buyer_note_for_first(buyers, response_text)
+                        continue
+
+                    else:
+                        _call_api(
+                            token,
+                            "sendMessage",
+                            {
+                                "chat_id": chat_id,
+                                "text": "Будь ласка, введіть номер у форматі +380XXXXXXXXX, e-mail або поділіться контактом кнопкою.",
+                            },
+                        )
         except KeyboardInterrupt:
             print("\nBot stopped by user.")
             break
