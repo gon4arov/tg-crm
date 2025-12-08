@@ -17,6 +17,10 @@
    ```bash
    echo "KEYCRM_TOKEN=ваш_keycrm_token" >> .env
    ```
+   Щоб обмежити доступ, вкажіть дозволені chat_id (через кому):
+   ```bash
+   echo "ALLOWED_CHAT_IDS=12345,67890" >> .env
+   ```
 3. Запустіть бота:
    ```bash
    python bot.py

@@ -54,6 +54,20 @@ def _get_token() -> str:
     return token
 
 
+def _allowed_chat_ids() -> set[int]:
+    raw = os.environ.get("ALLOWED_CHAT_IDS", "")
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except ValueError:
+            continue
+    return ids
+
+
 def _get_keycrm_token() -> str | None:
     # Токен KeyCRM (KEYCRM_TOKEN) потрібен, щоб перевірити, чи є номер у CRM.
     return os.environ.get("KEYCRM_TOKEN")
@@ -285,6 +299,7 @@ def _normalize_email(raw: str) -> str | None:
 def main() -> None:
     token = _get_token()
     offset = 0
+    allowed_ids = _allowed_chat_ids()
 
     # Якщо бот був підключений як вебхук у CRM, видаляємо його, щоб уникнути 409 Conflict.
     clear_webhook(token)
@@ -299,6 +314,14 @@ def main() -> None:
                 message = update.get("message") or {}
                 text = message.get("text") or ""
                 chat_id = message.get("chat", {}).get("id")
+
+                if allowed_ids and chat_id and chat_id not in allowed_ids:
+                    _call_api(
+                        token,
+                        "sendMessage",
+                        {"chat_id": chat_id, "text": "Доступ обмежено для цього бота."},
+                    )
+                    continue
 
                 if text.startswith("/start") and chat_id:
                     send_welcome(token, chat_id)
