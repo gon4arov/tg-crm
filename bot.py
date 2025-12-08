@@ -16,10 +16,7 @@ import urllib.parse
 import urllib.request
 
 
-WELCOME_TEXT = (
-    "Надішліть номер телефона чи емейл для ідентифікації клієнта. "
-    "Звертаємо увагу, що ми працюємо у будні дні з 09 по 18."
-)
+WELCOME_TEXT = "Надішліть номер телефона чи емейл для ідентифікації клієнта."
 
 KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
 
