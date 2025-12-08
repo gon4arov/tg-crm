@@ -28,6 +28,8 @@ REQUEST_CONTACT_BUTTON = {
     "one_time_keyboard": True,
 }
 
+KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
+
 
 def load_dotenv(path: str = ".env") -> None:
     """Very small .env loader; supports KEY=VALUE, ignores comments/blank lines."""
@@ -51,6 +53,11 @@ def _get_token() -> str:
     if not token:
         sys.exit("Please set the TELEGRAM_BOT_TOKEN environment variable.")
     return token
+
+
+def _get_keycrm_token() -> str | None:
+    # Токен KeyCRM (KEYCRM_TOKEN) потрібен, щоб перевірити, чи є номер у CRM.
+    return os.environ.get("KEYCRM_TOKEN")
 
 
 def _api_url(token: str, method: str) -> str:
@@ -98,9 +105,91 @@ def send_welcome(token: str, chat_id: int) -> None:
     _call_api(token, "sendMessage", payload)
 
 
+def clear_webhook(token: str) -> None:
+    """Remove Telegram webhook to avoid 409 conflicts when using getUpdates."""
+    try:
+        _call_api(token, "deleteWebhook", {"drop_pending_updates": True})
+    except Exception as exc:  # pragma: no cover - best-effort cleanup
+        print(f"Unable to delete webhook automatically: {exc}")
+
+
+def _fetch_keycrm(phone: str) -> dict | None:
+    keycrm_token = _get_keycrm_token()
+    if not keycrm_token:
+        return None
+
+    params = urllib.parse.urlencode(
+        {"limit": 15, "page": 1, "filter[buyer_phone]": phone}
+    )
+    url = f"{KEYCRM_API_URL}?{params}"
+    request = urllib.request.Request(url, method="GET")
+    request.add_header("Content-type", "application/json")
+    request.add_header("Accept", "application/json")
+    request.add_header("Authorization", f"Bearer {keycrm_token}")
+
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as resp:
+            return json.load(resp)
+    except Exception as exc:  # pragma: no cover - CRM checks are best-effort
+        print(f"CRM lookup failed for {phone}: {exc}")
+        return None
+
+
+def _lookup_buyer_by_phone(phone: str) -> tuple[dict | None, int]:
+    result = _fetch_keycrm(phone)
+    if result is None:
+        return None, 0
+    data = result.get("data") or []
+    total = result.get("total", 0)
+    buyer = data[0] if data else None
+    return buyer, total
+
+
+def _format_crm_message(buyer: dict | None, total: int) -> str:
+    if buyer is None:
+        if _get_keycrm_token():
+            return "Цей номер у CRM не знайдено."
+        return "Перевірка номера в CRM недоступна зараз."
+
+    name = buyer.get("full_name") or buyer.get("name") or "Без імені"
+    suffix = f" Всього збігів: {total}." if total else ""
+    return f"Номер вже є в CRM як: {name}.{suffix}"
+
+
+def _update_buyer_note(buyer: dict, message: str) -> None:
+    keycrm_token = _get_keycrm_token()
+    if not keycrm_token:
+        return
+
+    buyer_id = buyer.get("id")
+    if not buyer_id:
+        return
+
+    full_name = buyer.get("full_name") or buyer.get("name") or "Без імені"
+    existing_note = buyer.get("note") or ""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    new_note = (existing_note + f"\n[{timestamp}] Bot: {message}").strip()
+
+    payload = json.dumps({"full_name": full_name, "note": new_note}).encode("utf-8")
+    url = f"{KEYCRM_API_URL}/{buyer_id}"
+    request = urllib.request.Request(url, data=payload, method="PUT")
+    request.add_header("Content-type", "application/json")
+    request.add_header("Accept", "application/json")
+    request.add_header("Authorization", f"Bearer {keycrm_token}")
+
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as resp:
+            json.load(resp)
+    except Exception as exc:  # pragma: no cover - логування у CRM не критичне
+        print(f"Не вдалося оновити примітку в CRM для buyer_id={buyer_id}: {exc}")
+
+
 def main() -> None:
     token = _get_token()
     offset = 0
+
+    # Якщо бот був підключений як вебхук у CRM, видаляємо його, щоб уникнути 409 Conflict.
+    clear_webhook(token)
 
     print("Bot is running. Press Ctrl+C to stop.")
 
@@ -118,19 +207,22 @@ def main() -> None:
                 elif message.get("contact") and chat_id:
                     contact = message["contact"]
                     phone = contact.get("phone_number", "невідомий номер")
-                    _call_api(
-                        token,
-                        "sendMessage",
-                        {
-                            "chat_id": chat_id,
-                            "text": f"Дякуємо! Ми отримали ваш номер: {phone}",
-                        },
+                    buyer, total = _lookup_buyer_by_phone(phone)
+                    response_text = (
+                        f"Дякуємо! Ми отримали ваш номер: {phone}.\n"
+                        f"{_format_crm_message(buyer, total)}"
                     )
+                    _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
+                    if buyer:
+                        _update_buyer_note(buyer, response_text)
         except KeyboardInterrupt:
             print("\nBot stopped by user.")
             break
         except urllib.error.URLError as exc:
             print(f"Network error: {exc}. Retrying in 3 seconds...")
+            time.sleep(3)
+        except urllib.error.HTTPError as exc:
+            print(f"HTTP error: {exc}. Retrying in 3 seconds...")
             time.sleep(3)
         except Exception as exc:  # pragma: no cover - safety net for unexpected errors
             print(f"Unexpected error: {exc}. Retrying in 3 seconds...")
