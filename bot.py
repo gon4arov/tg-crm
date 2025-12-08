@@ -21,12 +21,6 @@ WELCOME_TEXT = (
     "Звертаємо увагу, що ми працюємо у будні дні з 09 по 18."
 )
 
-REQUEST_CONTACT_BUTTON = {
-    "keyboard": [[{"text": "Поділитися телефоном", "request_contact": True}]],
-    "resize_keyboard": True,
-    "one_time_keyboard": True,
-}
-
 KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
 
 
@@ -113,7 +107,6 @@ def send_welcome(token: str, chat_id: int) -> None:
     payload = {
         "chat_id": chat_id,
         "text": WELCOME_TEXT,
-        "reply_markup": json.dumps(REQUEST_CONTACT_BUTTON),
     }
     _call_api(token, "sendMessage", payload)
 
@@ -343,18 +336,6 @@ def main() -> None:
 
                 if text.startswith("/start") and chat_id:
                     send_welcome(token, chat_id)
-                elif message.get("contact") and chat_id:
-                    contact = message["contact"]
-                    phone_raw = contact.get("phone_number", "невідомий номер")
-                    phone = _normalize_phone(phone_raw) or phone_raw
-                    buyers, total = _lookup_phone_with_fallbacks(phone)
-                    response_text = (
-                        f"Дякуємо! Ми отримали ваш номер: {phone}.\n"
-                        f"{_format_crm_message(buyers, total)}"
-                    )
-                    _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
-                    if buyers:
-                        _update_buyer_note_for_first(buyers, response_text)
                 elif chat_id and text:
                     normalized = _normalize_phone(text)
                     if normalized:
