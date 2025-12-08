@@ -296,6 +296,24 @@ def _normalize_email(raw: str) -> str | None:
     return None
 
 
+def _lookup_phone_with_fallbacks(phone: str) -> tuple[list[dict], int]:
+    """Try to find buyers by phone with and without leading plus."""
+    variants: list[str] = []
+    if phone:
+        variants.append(phone)
+        plain = phone.lstrip("+")
+        if plain != phone:
+            variants.append(plain)
+        if not phone.startswith("+") and phone.startswith("380"):
+            variants.append(f"+{phone}")
+
+    for variant in variants:
+        buyers, total = _lookup_buyers("buyer_phone", variant)
+        if total:
+            return buyers, total
+    return [], 0
+
+
 def main() -> None:
     token = _get_token()
     offset = 0
@@ -329,7 +347,7 @@ def main() -> None:
                     contact = message["contact"]
                     phone_raw = contact.get("phone_number", "невідомий номер")
                     phone = _normalize_phone(phone_raw) or phone_raw
-                    buyers, total = _lookup_buyers("buyer_phone", phone)
+                    buyers, total = _lookup_phone_with_fallbacks(phone)
                     response_text = (
                         f"Дякуємо! Ми отримали ваш номер: {phone}.\n"
                         f"{_format_crm_message(buyers, total)}"
@@ -340,7 +358,7 @@ def main() -> None:
                 elif chat_id and text:
                     normalized = _normalize_phone(text)
                     if normalized:
-                        buyers, total = _lookup_buyers("buyer_phone", normalized)
+                        buyers, total = _lookup_phone_with_fallbacks(normalized)
                         response_text = (
                             f"Дякуємо! Ми отримали ваш номер: {normalized}.\n"
                             f"{_format_crm_message(buyers, total)}"
