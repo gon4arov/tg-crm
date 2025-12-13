@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import socket
 import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http import client as http_client
 
 
 WELCOME_TEXT = "Надішліть номер телефона чи емейл для ідентифікації клієнта."
@@ -28,6 +30,53 @@ logger = logging.getLogger("crm_bot")
 # Таймауты на сетевые запросы (секунды), можно переопределить через переменные окружения.
 TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
 KEYCRM_TIMEOUT = float(os.environ.get("KEYCRM_TIMEOUT_SECONDS", "8"))
+TELEGRAM_FORCE_IPV4 = os.environ.get("TELEGRAM_FORCE_IPV4") == "1"
+
+
+class IPv4HTTPSConnection(http_client.HTTPSConnection):
+    """HTTPSConnection, который резолвит только IPv4."""
+
+    def _create_connection(
+        self,
+        address,
+        timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+        source_address=None,
+    ):
+        host, port = address
+        err = None
+        for res in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM):
+            af, socktype, proto, canonname, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(sa)
+                return sock
+            except OSError as exc:  # pragma: no cover - сетевой код
+                err = exc
+                if sock is not None:
+                    sock.close()
+        if err is not None:
+            raise err
+        raise OSError("getaddrinfo returned empty for IPv4")
+
+
+class IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(IPv4HTTPSConnection, req)
+
+
+def _install_ipv4_only_opener() -> None:
+    opener = urllib.request.build_opener(IPv4HTTPSHandler())
+    urllib.request.install_opener(opener)
+    logger.info("Installed IPv4-only opener for HTTPS requests")
+
+
+if TELEGRAM_FORCE_IPV4:
+    _install_ipv4_only_opener()
 
 
 def load_dotenv(path: str = ".env") -> None:
