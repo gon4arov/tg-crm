@@ -25,6 +25,10 @@ KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("crm_bot")
 
+# Таймауты на сетевые запросы (секунды), можно переопределить через переменные окружения.
+TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
+KEYCRM_TIMEOUT = float(os.environ.get("KEYCRM_TIMEOUT_SECONDS", "8"))
+
 
 def load_dotenv(path: str = ".env") -> None:
     """Very small .env loader; supports KEY=VALUE, ignores comments/blank lines."""
@@ -79,13 +83,18 @@ def _call_api(token: str, method: str, params: dict | None = None) -> dict:
     if params:
         data = urllib.parse.urlencode(params).encode("utf-8")
     request = urllib.request.Request(_api_url(token, method), data=data, method="POST")
+    started_at = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as response:
+        with urllib.request.urlopen(
+            request, timeout=TELEGRAM_TIMEOUT, context=_ssl_context()
+        ) as response:
             parsed = json.load(response)
-            logger.info("Telegram response: %s", parsed.get("ok"))
+            duration = time.perf_counter() - started_at
+            logger.info("Telegram response: ok=%s in %.3fs", parsed.get("ok"), duration)
             return parsed
     except Exception as exc:
-        logger.exception("Telegram request failed for %s: %s", method, exc)
+        duration = time.perf_counter() - started_at
+        logger.exception("Telegram request failed for %s in %.3fs: %s", method, duration, exc)
         raise
 
 
@@ -148,18 +157,22 @@ def _fetch_keycrm(filter_field: str, value: str) -> dict | None:
     request.add_header("Authorization", f"Bearer {keycrm_token}")
 
     logger.info("KeyCRM request: filter[%s]=%s", filter_field, value)
+    started_at = time.perf_counter()
 
     try:
-        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as resp:
+        with urllib.request.urlopen(request, timeout=KEYCRM_TIMEOUT, context=_ssl_context()) as resp:
             parsed = json.load(resp)
+            duration = time.perf_counter() - started_at
             logger.info(
-                "KeyCRM response: total=%s count=%s",
+                "KeyCRM response: total=%s count=%s in %.3fs",
                 parsed.get("total"),
                 len(parsed.get("data") or []),
+                duration,
             )
             return parsed
     except Exception as exc:  # pragma: no cover - CRM checks are best-effort
-        logger.warning("CRM lookup failed for value=%s: %s", value, exc)
+        duration = time.perf_counter() - started_at
+        logger.warning("CRM lookup failed for value=%s in %.3fs: %s", value, duration, exc)
         return None
 
 
