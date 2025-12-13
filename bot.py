@@ -27,11 +27,9 @@ KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("crm_bot")
 
-# Таймауты на сетевые запросы (секунды), можно переопределить через переменные окружения.
-TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
-KEYCRM_TIMEOUT = float(os.environ.get("KEYCRM_TIMEOUT_SECONDS", "8"))
-TELEGRAM_FORCE_IPV4 = os.environ.get("TELEGRAM_FORCE_IPV4") == "1"
-
+# Значения по умолчанию, будут обновлены после загрузки .env.
+TELEGRAM_TIMEOUT = 8.0
+KEYCRM_TIMEOUT = 8.0
 
 class IPv4HTTPSConnection(http_client.HTTPSConnection):
     """HTTPSConnection, который резолвит только IPv4."""
@@ -75,10 +73,6 @@ def _install_ipv4_only_opener() -> None:
     logger.info("Installed IPv4-only opener for HTTPS requests")
 
 
-if TELEGRAM_FORCE_IPV4:
-    _install_ipv4_only_opener()
-
-
 def load_dotenv(path: str = ".env") -> None:
     """Very small .env loader; supports KEY=VALUE, ignores comments/blank lines."""
     if not os.path.exists(path):
@@ -93,6 +87,21 @@ def load_dotenv(path: str = ".env") -> None:
             key, value = stripped.split("=", 1)
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def _apply_env_settings() -> None:
+    """Load .env and apply runtime settings (timeouts, IPv4 forcing)."""
+    global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT  # type: ignore
+
+    load_dotenv()
+    TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
+    KEYCRM_TIMEOUT = float(os.environ.get("KEYCRM_TIMEOUT_SECONDS", "8"))
+    if os.environ.get("TELEGRAM_FORCE_IPV4") == "1":
+        _install_ipv4_only_opener()
+
+
+# Инициализация настроек при импорте.
+_apply_env_settings()
 
 
 def _get_token() -> str:
