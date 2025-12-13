@@ -99,10 +99,6 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-# Инициализация настроек при импорте.
-_apply_env_settings()
-
-
 def _apply_env_settings() -> None:
     """Load .env and apply runtime settings (timeouts, IPv4 forcing)."""
     global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT, TELEGRAM_POLL_TIMEOUT, _TELEGRAM_OPENER, _TELEGRAM_USE_OPENER  # type: ignore
@@ -123,6 +119,10 @@ def _apply_env_settings() -> None:
     else:
         _TELEGRAM_OPENER = None
         _TELEGRAM_USE_OPENER = False
+
+
+# Инициализация настроек при импорте.
+_apply_env_settings()
 
 
 def _get_token() -> str:
