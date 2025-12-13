@@ -30,6 +30,8 @@ logger = logging.getLogger("crm_bot")
 # Значения по умолчанию, будут обновлены после загрузки .env.
 TELEGRAM_TIMEOUT = 8.0
 KEYCRM_TIMEOUT = 8.0
+TELEGRAM_POLL_TIMEOUT = 20
+_TELEGRAM_OPENER = urllib.request.build_opener()
 
 class IPv4HTTPSConnection(http_client.HTTPSConnection):
     """HTTPSConnection, который резолвит только IPv4."""
@@ -67,12 +69,6 @@ class IPv4HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(IPv4HTTPSConnection, req)
 
 
-def _install_ipv4_only_opener() -> None:
-    opener = urllib.request.build_opener(IPv4HTTPSHandler())
-    urllib.request.install_opener(opener)
-    logger.info("Installed IPv4-only opener for HTTPS requests")
-
-
 def load_dotenv(path: str = ".env") -> None:
     """Very small .env loader; supports KEY=VALUE, ignores comments/blank lines."""
     if not os.path.exists(path):
@@ -91,13 +87,21 @@ def load_dotenv(path: str = ".env") -> None:
 
 def _apply_env_settings() -> None:
     """Load .env and apply runtime settings (timeouts, IPv4 forcing)."""
-    global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT  # type: ignore
+    global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT, TELEGRAM_POLL_TIMEOUT, _TELEGRAM_OPENER  # type: ignore
 
     load_dotenv()
     TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
     KEYCRM_TIMEOUT = float(os.environ.get("KEYCRM_TIMEOUT_SECONDS", "8"))
+    TELEGRAM_POLL_TIMEOUT = int(os.environ.get("TELEGRAM_POLL_TIMEOUT_SECONDS", "20"))
+    # Не даём poll висеть дольше сетевого таймаута.
+    if TELEGRAM_POLL_TIMEOUT >= TELEGRAM_TIMEOUT:
+        TELEGRAM_POLL_TIMEOUT = max(int(TELEGRAM_TIMEOUT) - 1, 1)
+
     if os.environ.get("TELEGRAM_FORCE_IPV4") == "1":
-        _install_ipv4_only_opener()
+        _TELEGRAM_OPENER = urllib.request.build_opener(IPv4HTTPSHandler())
+        logger.info("Using IPv4-only opener for Telegram calls")
+    else:
+        _TELEGRAM_OPENER = urllib.request.build_opener()
 
 
 # Инициализация настроек при импорте.
@@ -143,7 +147,7 @@ def _call_api(token: str, method: str, params: dict | None = None) -> dict:
     request = urllib.request.Request(_api_url(token, method), data=data, method="POST")
     started_at = time.perf_counter()
     try:
-        with urllib.request.urlopen(
+        with _TELEGRAM_OPENER.open(  # type: ignore[attr-defined]
             request, timeout=TELEGRAM_TIMEOUT, context=_ssl_context()
         ) as response:
             parsed = json.load(response)
@@ -170,7 +174,7 @@ def _ssl_context() -> ssl.SSLContext:
 
 
 def get_updates(token: str, offset: int) -> list[dict]:
-    payload = {"offset": offset, "timeout": 25}
+    payload = {"offset": offset, "timeout": TELEGRAM_POLL_TIMEOUT}
     response = _call_api(token, "getUpdates", payload)
     return response.get("result", [])
 
@@ -192,7 +196,7 @@ def clear_webhook(token: str) -> None:
     try:
         _call_api(token, "deleteWebhook", {"drop_pending_updates": True})
     except Exception as exc:  # pragma: no cover - best-effort cleanup
-        print(f"Unable to delete webhook automatically: {exc}")
+        logger.warning("Unable to delete webhook automatically: %s", exc)
 
 
 def _fetch_keycrm(filter_field: str, value: str) -> dict | None:
@@ -350,10 +354,12 @@ def _update_buyer_note_for_first(buyers: list[dict], message: str) -> None:
     request.add_header("Authorization", f"Bearer {keycrm_token}")
 
     try:
-        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as resp:
+        with urllib.request.urlopen(request, timeout=KEYCRM_TIMEOUT, context=_ssl_context()) as resp:
             json.load(resp)
     except Exception as exc:  # pragma: no cover - логування у CRM не критичне
-        print(f"Не вдалося оновити примітку в CRM для buyer_id={buyer_id}: {exc}")
+        logger.warning(
+            "Не вдалося оновити примітку в CRM для buyer_id=%s: %s", buyer_id, exc
+        )
 
 
 def _normalize_phone(raw: str) -> str | None:
