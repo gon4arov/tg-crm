@@ -31,7 +31,8 @@ logger = logging.getLogger("crm_bot")
 TELEGRAM_TIMEOUT = 8.0
 KEYCRM_TIMEOUT = 8.0
 TELEGRAM_POLL_TIMEOUT = 20
-_TELEGRAM_OPENER = urllib.request.build_opener()
+_TELEGRAM_OPENER: urllib.request.OpenerDirector | None = None
+_TELEGRAM_USE_OPENER = False
 
 class IPv4HTTPSConnection(http_client.HTTPSConnection):
     """HTTPSConnection, который резолвит только IPv4."""
@@ -87,7 +88,7 @@ def load_dotenv(path: str = ".env") -> None:
 
 def _apply_env_settings() -> None:
     """Load .env and apply runtime settings (timeouts, IPv4 forcing)."""
-    global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT, TELEGRAM_POLL_TIMEOUT, _TELEGRAM_OPENER  # type: ignore
+    global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT, TELEGRAM_POLL_TIMEOUT, _TELEGRAM_OPENER, _TELEGRAM_USE_OPENER  # type: ignore
 
     load_dotenv()
     TELEGRAM_TIMEOUT = float(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "8"))
@@ -98,10 +99,13 @@ def _apply_env_settings() -> None:
         TELEGRAM_POLL_TIMEOUT = max(int(TELEGRAM_TIMEOUT) - 1, 1)
 
     if os.environ.get("TELEGRAM_FORCE_IPV4") == "1":
-        _TELEGRAM_OPENER = urllib.request.build_opener(IPv4HTTPSHandler())
+        # Используем собственный opener с IPv4 HTTPS handler и контекстом TLS по текущим настройкам.
+        _TELEGRAM_OPENER = urllib.request.build_opener(IPv4HTTPSHandler(context=_ssl_context()))
+        _TELEGRAM_USE_OPENER = True
         logger.info("Using IPv4-only opener for Telegram calls")
     else:
-        _TELEGRAM_OPENER = urllib.request.build_opener()
+        _TELEGRAM_OPENER = None
+        _TELEGRAM_USE_OPENER = False
 
 
 # Инициализация настроек при импорте.
@@ -147,9 +151,16 @@ def _call_api(token: str, method: str, params: dict | None = None) -> dict:
     request = urllib.request.Request(_api_url(token, method), data=data, method="POST")
     started_at = time.perf_counter()
     try:
-        with _TELEGRAM_OPENER.open(  # type: ignore[attr-defined]
-            request, timeout=TELEGRAM_TIMEOUT, context=_ssl_context()
-        ) as response:
+        if _TELEGRAM_USE_OPENER and _TELEGRAM_OPENER:
+            response_obj = _TELEGRAM_OPENER.open(  # type: ignore[attr-defined]
+                request, timeout=TELEGRAM_TIMEOUT
+            )
+        else:
+            response_obj = urllib.request.urlopen(
+                request, timeout=TELEGRAM_TIMEOUT, context=_ssl_context()
+            )
+
+        with response_obj as response:
             parsed = json.load(response)
             duration = time.perf_counter() - started_at
             logger.info("Telegram response: ok=%s in %.3fs", parsed.get("ok"), duration)
