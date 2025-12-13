@@ -6,6 +6,7 @@ and long polling to avoid external dependencies.
 """
 
 import json
+import logging
 import os
 import re
 import ssl
@@ -19,6 +20,10 @@ import urllib.request
 WELCOME_TEXT = "Надішліть номер телефона чи емейл для ідентифікації клієнта."
 
 KEYCRM_API_URL = "https://openapi.keycrm.app/v1/buyer"
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("crm_bot")
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -69,12 +74,19 @@ def _api_url(token: str, method: str) -> str:
 
 
 def _call_api(token: str, method: str, params: dict | None = None) -> dict:
+    logger.info("Telegram call: %s", method)
     data = None
     if params:
         data = urllib.parse.urlencode(params).encode("utf-8")
     request = urllib.request.Request(_api_url(token, method), data=data, method="POST")
-    with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as response:
+            parsed = json.load(response)
+            logger.info("Telegram response: %s", parsed.get("ok"))
+            return parsed
+    except Exception as exc:
+        logger.exception("Telegram request failed for %s: %s", method, exc)
+        raise
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -135,11 +147,19 @@ def _fetch_keycrm(filter_field: str, value: str) -> dict | None:
     request.add_header("Accept", "application/json")
     request.add_header("Authorization", f"Bearer {keycrm_token}")
 
+    logger.info("KeyCRM request: filter[%s]=%s", filter_field, value)
+
     try:
         with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as resp:
-            return json.load(resp)
+            parsed = json.load(resp)
+            logger.info(
+                "KeyCRM response: total=%s count=%s",
+                parsed.get("total"),
+                len(parsed.get("data") or []),
+            )
+            return parsed
     except Exception as exc:  # pragma: no cover - CRM checks are best-effort
-        print(f"CRM lookup failed for {phone}: {exc}")
+        logger.warning("CRM lookup failed for value=%s: %s", value, exc)
         return None
 
 
@@ -312,7 +332,7 @@ def main() -> None:
     # Якщо бот був підключений як вебхук у CRM, видаляємо його, щоб уникнути 409 Conflict.
     clear_webhook(token)
 
-    print("Bot is running. Press Ctrl+C to stop.")
+    logger.info("Bot is running. Press Ctrl+C to stop.")
 
     while True:
         try:
@@ -322,6 +342,8 @@ def main() -> None:
                 message = update.get("message") or {}
                 text = message.get("text") or ""
                 chat_id = message.get("chat", {}).get("id")
+
+                logger.info("Update chat_id=%s text=%s", chat_id, text)
 
                 if allowed_ids and chat_id and chat_id not in allowed_ids:
                     _call_api(
@@ -371,13 +393,13 @@ def main() -> None:
             print("\nBot stopped by user.")
             break
         except urllib.error.URLError as exc:
-            print(f"Network error: {exc}. Retrying in 3 seconds...")
+            logger.warning("Network error: %s. Retrying in 3 seconds...", exc)
             time.sleep(3)
         except urllib.error.HTTPError as exc:
-            print(f"HTTP error: {exc}. Retrying in 3 seconds...")
+            logger.warning("HTTP error: %s. Retrying in 3 seconds...", exc)
             time.sleep(3)
         except Exception as exc:  # pragma: no cover - safety net for unexpected errors
-            print(f"Unexpected error: {exc}. Retrying in 3 seconds...")
+            logger.exception("Unexpected error: %s. Retrying in 3 seconds...", exc)
             time.sleep(3)
 
 
