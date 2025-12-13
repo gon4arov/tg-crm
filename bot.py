@@ -86,6 +86,23 @@ def load_dotenv(path: str = ".env") -> None:
                 os.environ[key] = value
 
 
+def _ssl_context() -> ssl.SSLContext:
+    ca_bundle = os.environ.get("TELEGRAM_CA_BUNDLE")
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+
+    if os.environ.get("TELEGRAM_SKIP_TLS_VERIFY") == "1":
+        # В корпоративных сетях с перехватом TLS сертификат может быть самоподписанным.
+        # Отключение проверки уменьшает безопасность, используйте только если доверяете сети.
+        return ssl._create_unverified_context()
+
+    return ssl.create_default_context()
+
+
+# Инициализация настроек при импорте.
+_apply_env_settings()
+
+
 def _apply_env_settings() -> None:
     """Load .env and apply runtime settings (timeouts, IPv4 forcing)."""
     global TELEGRAM_TIMEOUT, KEYCRM_TIMEOUT, TELEGRAM_POLL_TIMEOUT, _TELEGRAM_OPENER, _TELEGRAM_USE_OPENER  # type: ignore
@@ -106,10 +123,6 @@ def _apply_env_settings() -> None:
     else:
         _TELEGRAM_OPENER = None
         _TELEGRAM_USE_OPENER = False
-
-
-# Инициализация настроек при импорте.
-_apply_env_settings()
 
 
 def _get_token() -> str:
