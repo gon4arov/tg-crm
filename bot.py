@@ -355,37 +355,6 @@ def _format_crm_message(buyers: list[dict], total: int) -> str:
     return "\n".join(lines)
 
 
-def _update_buyer_note_for_first(buyers: list[dict], message: str) -> None:
-    keycrm_token = _get_keycrm_token()
-    if not keycrm_token or not buyers:
-        return
-
-    buyer = buyers[0]
-    buyer_id = buyer.get("id")
-    if not buyer_id:
-        return
-
-    full_name = buyer.get("full_name") or buyer.get("name") or "Без імені"
-    existing_note = buyer.get("note") or ""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    new_note = (existing_note + f"\n[{timestamp}] Bot: {message}").strip()
-
-    payload = json.dumps({"full_name": full_name, "note": new_note}).encode("utf-8")
-    url = f"{KEYCRM_API_URL}/{buyer_id}"
-    request = urllib.request.Request(url, data=payload, method="PUT")
-    request.add_header("Content-type", "application/json")
-    request.add_header("Accept", "application/json")
-    request.add_header("Authorization", f"Bearer {keycrm_token}")
-
-    try:
-        with urllib.request.urlopen(request, timeout=KEYCRM_TIMEOUT, context=_ssl_context()) as resp:
-            json.load(resp)
-    except Exception as exc:  # pragma: no cover - логування у CRM не критичне
-        logger.warning(
-            "Не вдалося оновити примітку в CRM для buyer_id=%s: %s", buyer_id, exc
-        )
-
-
 def _normalize_phone(raw: str) -> str | None:
     """Return phone in format +380XXXXXXXXX or None if cannot normalize."""
     digits = re.sub(r"\D", "", raw or "")
@@ -465,8 +434,6 @@ def main() -> None:
                             f"{_format_crm_message(buyers, total)}"
                         )
                         _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
-                        if buyers:
-                            _update_buyer_note_for_first(buyers, response_text)
                         continue
 
                     email = _normalize_email(text)
@@ -477,8 +444,6 @@ def main() -> None:
                             f"{_format_crm_message(buyers, total)}"
                         )
                         _call_api(token, "sendMessage", {"chat_id": chat_id, "text": response_text})
-                        if buyers:
-                            _update_buyer_note_for_first(buyers, response_text)
                         continue
 
                     else:
